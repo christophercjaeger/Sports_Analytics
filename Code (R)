@@ -1,0 +1,810 @@
+# Install necessary packages
+install.packages("rpart")
+install.packages("ROSE")
+install.packages("caret")
+install.packages("rpart.plot")
+install.packages("randomForest")
+install.packages("MASS")
+install.packages("biotools")
+install.packages("nnet")
+install.packages("e1071")
+install.packages("NeuralNetTools")
+install.packages("tidyr")
+
+#load necessary packages
+library(nnet)   
+library(e1071)  
+library(MASS)   
+library(biotools)  
+library(rpart)
+library(ROSE)
+library(caret)
+library(rpart.plot)
+library(randomForest)
+library(ggplot2)
+library(pROC)
+library(NeuralNetTools)
+library(tidyr)
+library(nnet)  
+
+
+
+
+
+
+# Edit data to more mutable data
+Passing_Data <- na.omit(Passing_Data)
+Passing_Data2 <- na.omit(Passing_Data2)
+categorical_vars <- c("offenseFormation", "dropbackType", "passLocationType", 
+                      "pff_passCoverage", "pff_manZone", "receiverAlignment", "Success","playAction" )
+for (var in categorical_vars) {
+  Passing_Data[[var]] <- as.factor(Passing_Data[[var]])
+}
+
+head(Passing_Data)
+
+#SMOTE Technique
+Passing_data_smote <- ROSE(Success ~ ., data = Passing_Data, N = 10000, p = 0.5)$data
+table(Passing_data_smote$Success)
+# Partition the data into training and testing sets (70% training, 30% testing)
+set.seed(202412)
+n <- nrow(Passing_Data)
+train_indices <- sample(1:n, size = 0.7 * n)
+train_data <- Passing_data_smote[train_indices, ]
+test_data <- Passing_data_smote[-train_indices, ]
+
+
+#Fitting Logistic Regression
+logistic_model <- glm(
+  Success ~ .-offenseFormation -quarter-pff_manZone -passLocationType -receiverAlignment -TimeinQuarter-TimeinGame-targetY2,
+  data = train_data,  
+  family = binomial
+)
+
+summary(logistic_model)
+train_control <- trainControl(method = "cv", number = 10)  
+cv_model <- train(
+  Success ~ . -offenseFormation -quarter-pff_manZone -passLocationType -receiverAlignment -TimeinQuarter-TimeinGame-targetY2,
+  data = train_data, 
+  method = "glm", 
+  family = "binomial", 
+  trControl = train_control
+)
+
+print(cv_model)
+
+# Generate predictions & Test accuracy 
+predictions <- predict(cv_model, newdata = test_data)
+test_data$Success <- factor(test_data$Success, levels = c("0", "1"))
+confusion_matrix <- confusionMatrix(predictions, test_data$Success)
+print(confusion_matrix)
+misclassification_rate <- 1 - confusion_matrix$overall['Accuracy']
+cat("Misclassification Rate:", misclassification_rate, "\n")
+
+
+#ROC Curve
+probabilities <- predict(cv_model, newdata = test_data, type = "prob")[, "1"]
+roc_curve <- roc(test_data$Success, probabilities)
+plot(roc_curve, main = "Logistic ROC Curve", col = "blue", lwd = 2)
+auc_value <- auc(roc_curve)
+cat("AUC:", auc_value, "\n")
+
+
+
+
+
+# Decision Tree
+tree_model <- rpart(
+  Success ~ .,
+  data = train_data,
+  method = "class",
+  control = rpart.control(cp = 0.001, minsplit = 20, maxdepth = 10)  )
+
+print(tree_model)
+summary(tree_model)
+rpart.plot(
+  tree_model,
+  type = 2,          
+  extra = 104,       
+  fallen.leaves = TRUE, 
+  cex = 0.7
+)
+
+# Determine ideal pruned tree and then print/plot it
+printcp(tree_model)
+plotcp(tree_model)  
+
+optimal_cp <- tree_model$cptable[which.min(tree_model$cptable[, "xerror"]), "CP"]
+pruned_tree <- prune(tree_model, cp = optimal_cp)
+rpart.plot(
+  pruned_tree,
+  type = 2,           
+  extra = 104,        
+  fallen.leaves = TRUE,
+  cex = 0.7           
+)
+#Error Rate 
+predictions_unpruned <- predict(tree_model, newdata = test_data, type = "class")
+misclass_error_unpruned <- mean(predictions_unpruned != test_data$Success)
+cat("Misclassification Error for Unpruned Tree:", misclass_error_unpruned, "\n")
+predictions_pruned <- predict(pruned_tree, newdata = test_data, type = "class")
+confusion_matrix_pruned <- confusionMatrix(predictions_pruned, test_data$Success)
+print(confusion_matrix_pruned)
+misclass_error_pruned <- mean(predictions_pruned != test_data$Success)
+cat("Misclassification Error for Pruned Tree:", misclass_error_pruned, "\n")
+
+#Smaller tree for easier vizualization
+tree_model_small <- rpart(
+  Success ~ .,
+  data = train_data,
+  method = "class",
+  control = rpart.control(cp = 0.007, minsplit = 20, maxdepth = 8)
+)
+print(tree_model_small)
+summary(tree_model_small)
+rpart.plot(
+  tree_model_small,
+  type = 2,            # Type 2: Draw labels at the splits
+  extra = 104,         # Display class distribution percentages
+  fallen.leaves = TRUE, 
+  cex = 0.7            # Adjust text size
+)
+
+#Smaller Tree predictions
+tree_predictions_small <- predict(tree_model_small, newdata = test_data, type = "class")
+confusion_matrix_small <- confusionMatrix(tree_predictions_small, test_data$Success)
+print(confusion_matrix_small)
+misclass_error_small <- 1 - confusion_matrix_small$overall["Accuracy"]
+cat("Misclassification Error for Small Tree:", round(misclass_error_small, 4), "\n")
+
+
+
+
+
+
+
+
+# ROC 
+pred_prob_unpruned <- predict(tree_model, newdata = test_data, type = "prob")[, 2] 
+roc_unpruned <- roc(test_data$Success, pred_prob_unpruned, levels = rev(levels(test_data$Success)))
+cat("AUC for Unpruned Tree:", auc(roc_unpruned), "\n")
+pred_prob_pruned <- predict(pruned_tree, newdata = test_data, type = "prob")[, 2]
+roc_pruned <- roc(test_data$Success, pred_prob_pruned, levels = rev(levels(test_data$Success)))
+cat("AUC for Pruned Tree:", auc(roc_pruned), "\n")
+pred_prob_small <- predict(tree_model_small, newdata = test_data, type = "prob")[, 2]
+roc_small <- roc(test_data$Success, pred_prob_small, levels = rev(levels(test_data$Success)))
+cat("AUC for Smaller Tree:", auc(roc_small), "\n")
+plot(roc_unpruned, col = "blue", main = "ROC Curves for Decision Trees", print.auc = TRUE)
+lines(roc_pruned, col = "green")
+lines(roc_small, col = "red")
+legend("bottomright", legend = c("Unpruned Tree", "Pruned Tree", "Smaller Tree"),
+       col = c("blue", "green", "red"), lwd = 2)
+
+
+
+
+
+
+#Random forest to decide ideal forest
+mtry_values <- c(2, 3, 4, 5) 
+ntree_values <- seq(50, 1000, by = 50)  
+misclass_results <- data.frame()
+for (mtry in mtry_values) {
+  for (ntree in ntree_values) {
+    rf_model <- randomForest(
+      Success ~ .,
+      data = train_data,
+      ntree = ntree,
+      mtry = mtry,
+      importance = TRUE 
+    )
+    
+    # Predictions
+    predictions <- predict(rf_model, newdata = test_data)
+    misclass_rate <- mean(predictions != test_data$Success)
+    
+    misclass_results <- rbind(
+      misclass_results,
+      data.frame(mtry = mtry, ntree = ntree, Misclassification_Rate = misclass_rate)
+    )
+  }
+}
+optimal_params <- misclass_results[which.min(misclass_results$Misclassification_Rate), ]
+cat("Optimal Parameters:\n")
+print(optimal_params)
+
+# Fit the final Random Forest model using the optimal mtry and ntree
+final_rf_model <- randomForest(
+  Success ~ .,
+  data = train_data,
+  ntree = optimal_params$ntree,
+  mtry = optimal_params$mtry,
+  importance = TRUE
+)
+
+#More error Rates
+final_predictions <- predict(final_rf_model, newdata = test_data, type = "class")
+final_misclass_error <- mean(final_predictions != test_data$Success)
+cat("Final Misclassification Error for Random Forest:", final_misclass_error, "\n")
+rf_probabilities <- predict(final_rf_model, newdata = test_data, type = "prob")[, 2]
+
+#ROC Curves
+roc_curve_rf <- roc(test_data$Success, rf_probabilities, levels = rev(levels(test_data$Success)))
+plot(roc_curve_rf, col = "blue", lwd = 2, main = "ROC Curve for Random Forest Model")
+auc_value_rf <- auc(roc_curve_rf)
+legend("bottomright", legend = paste("AUC =", round(auc_value_rf, 3)), col = "blue", lwd = 2)
+cat("AUC for Final Random Forest Model:", auc_value_rf, "\n")
+
+#Plotted tree vs. misclass vs mtry
+ggplot(misclass_results, aes(x = ntree, y = Misclassification_Rate, color = factor(mtry))) +
+  geom_line(size = 1) +
+  labs(
+    title = "Misclassification Rate vs Number of Trees for Different mtry Values",
+    x = "Number of Trees",
+    y = "Misclassification Rate",
+    color = "mtry"
+  ) +
+  theme_minimal()
+var_importance <- importance(final_rf_model)
+print(var_importance)
+
+#importanceprinted
+importance_long <- data.frame(
+  Variable = rownames(var_importance),
+  MeanDecreaseAccuracy = var_importance[, "MeanDecreaseAccuracy"],
+  MeanDecreaseGini = var_importance[, "MeanDecreaseGini"]
+) %>%
+  pivot_longer(
+    cols = c(MeanDecreaseAccuracy, MeanDecreaseGini),
+    names_to = "Metric",
+    values_to = "Importance"
+  )
+library(ggplot2)
+#importanceprinted
+ggplot(importance_long, aes(x = reorder(Variable, Importance), y = Importance, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(
+    title = "Variable Importance: Mean Decrease Accuracy and Gini",
+    x = "Variable",
+    y = "Importance",
+    fill = "Metric"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("steelblue", "darkorange"))
+
+
+confusion_matrix_rf <- confusionMatrix(final_predictions, test_data$Success)
+print(confusion_matrix_rf)
+
+
+
+
+
+
+#Edit data of Rushing Data to more mutable options
+set.seed(202412)
+categorical_vars2 <- c("offenseFormation", "rushLocationType", 
+                       "pff_passCoverage", "pff_manZone", "receiverAlignment", "Success", "pff_runConceptPrimary")
+for (var in categorical_vars2) {
+  Running_Data[[var]] <- as.factor(Running_Data[[var]])
+}
+Running_Data_smote <- ROSE(Success ~ ., data = Running_Data, N = 10000, p = 0.5)$data
+# Step 3: Partition the data (70% train, 30% test)
+train_indices <- createDataPartition(Running_Data_smote$Success, p = 0.7, list = FALSE)
+train_data2 <- Running_Data_smote[train_indices, ]
+test_data2 <- Running_Data_smote[-train_indices, ]
+
+
+# Run logistic regression on train_data2
+logistic_model_Rushing <- glm(Success ~ .-pff_manZone -receiverAlignment -TimeinGame-playClockAtSnap-offenseFormation-absoluteYardline2-TimeinQuarter, 
+                      data = train_data2, 
+                      family = binomial)
+summary(logistic_model_Rushing)
+cv_logistic_model2 <- train(Success ~ .-pff_manZone -receiverAlignment -TimeinGame-playClockAtSnap-offenseFormation-absoluteYardline2-TimeinQuarter, 
+                           data = train_data2, 
+                           family = binomial, 
+                           trControl = trainControl(method = "cv", number = 10))
+#Evaluating Model
+cv_logistic_pred2 <- predict(cv_logistic_model2, newdata = test_data2)
+cv_logistic_confusion_matrix2 <- confusionMatrix(cv_logistic_pred2, test_data2$Success)
+cv_logistic_misclassification2 <- 1 - cv_logistic_confusion_matrix2$overall['Accuracy']
+print("Logistic Regression Confusion Matrix:")
+print(cv_logistic_confusion_matrix2)
+print(paste("Logistic Regression Misclassification Error:", cv_logistic_misclassification2))
+
+
+# Generate predictions and run ROC
+positive_class <- levels(test_data2$Success)[2]  
+logistic_probabilities <- predict(cv_logistic_model2, newdata = test_data2, type = "prob")[, positive_class]
+roc_logistic <- roc(test_data2$Success, logistic_probabilities)
+plot(roc_logistic, main = "ROC Curve for Logistic Regression", col = "blue", lwd = 2)
+auc_logistic <- auc(roc_logistic)
+cat("AUC for Logistic Regression:", auc_logistic, "\n")
+
+#Classification Tree
+classification_tree2 <- rpart(Success ~ ., data = train_data2, method = "class")
+rpart.plot(classification_tree2)
+tree_pred2 <- predict(classification_tree2, newdata = test_data2, type = "class")
+tree_confusion_matrix2 <- confusionMatrix(tree_pred2, test_data2$Success)
+tree_misclassification2 <- 1 - tree_confusion_matrix2$overall['Accuracy']
+print("Classification Tree Confusion Matrix:")
+print(tree_confusion_matrix2)
+print(paste("Classification Tree Misclassification Error:", tree_misclassification2))
+
+
+
+# Train the model using cross-validation and tune the cp parameter and use that to bild another model
+cv_tree_model <- train(Success ~ ., 
+                       data = train_data2, 
+                       method = "rpart", 
+                       trControl = trainControl(method = "cv", number = 10), 
+                       tuneLength = 10) 
+best_cp <- cv_tree_model$bestTune$cp
+print(paste("Best cp value from CV:", best_cp))
+classification_tree2 <- rpart(Success ~ ., 
+                              data = train_data2, 
+                              method = "class", 
+                              control = rpart.control(cp = best_cp))
+
+#plot tree 2
+rpart.plot(
+  classification_tree2,
+  type = 2,       
+  extra = 104,        
+  fallen.leaves = TRUE, 
+  cex = 0.8           
+)
+
+
+# Step 9: Make Predictions on the Test Data
+tree_pred2 <- predict(classification_tree2, newdata = test_data2, type = "class")
+tree_confusion_matrix2 <- confusionMatrix(tree_pred2, test_data2$Success)
+tree_misclassification2 <- 1 - tree_confusion_matrix2$overall['Accuracy']
+print("Classification Tree Confusion Matrix:")
+print(tree_confusion_matrix2)
+print(paste("Classification Tree Misclassification Error:", tree_misclassification2))
+tree_probabilities <- predict(classification_tree2, newdata = test_data2, type = "prob")[, positive_class]
+
+# Create the ROC curve for the Classification Tree
+roc_tree <- roc(test_data2$Success, tree_probabilities)
+plot(roc_tree, main = "ROC Curve for Classification Tree", col = "red", lwd = 2)
+auc_tree <- auc(roc_tree)
+cat("AUC for Classification Tree:", auc_tree, "\n")
+
+
+
+
+
+
+
+
+# Define ranges for mtry and ntree to decide best one for ranom forest
+mtry_values <- c(2, 3, 4, 5)
+ntree_values <- seq(100, 1000, by = 100)
+misclass_results <- data.frame()
+for (mtry in mtry_values) {
+  for (ntree in ntree_values) {
+    rf_model <- randomForest(
+      Success ~ .,
+      data = train_data2,
+      ntree = ntree,
+      mtry = mtry,
+      importance = TRUE
+    )
+    rf_predictions <- predict(rf_model, newdata = test_data2, type = "class")
+    misclassification_rate <- mean(rf_predictions != test_data2$Success)
+    misclass_results <- rbind(
+      misclass_results,
+      data.frame(mtry = mtry, ntree = ntree, Misclassification_Rate = misclassification_rate)
+    )
+  }
+}
+
+optimal_params <- misclass_results[which.min(misclass_results$Misclassification_Rate), ]
+cat("Optimal Parameters:\n")
+print(optimal_params)
+#Final model based on optimal parameters
+final_rf_model <- randomForest(
+  Success ~ .,
+  data = train_data2,
+  ntree = optimal_params$ntree,
+  mtry = optimal_params$mtry,
+  importance = TRUE
+)
+
+# Evaluate the final model
+final_rf_predictions <- predict(final_rf_model, newdata = test_data2, type = "class")
+confusion_matrix_rf <- confusionMatrix(final_rf_predictions, test_data2$Success)
+rf_misclassification <- mean(final_rf_predictions != test_data2$Success)
+cat("\nConfusion Matrix for Final Model:\n")
+print(confusion_matrix_rf)
+cat("Final Misclassification Rate:", rf_misclassification, "\n")
+
+# Plot the graph for  Misclassification Rate vs ntree for each mtry
+library(ggplot2)
+ggplot(misclass_results, aes(x = ntree, y = Misclassification_Rate, color = factor(mtry))) +
+  geom_line(size = 1) +
+  labs(
+    title = "Misclassification Rate vs Number of Trees for Different mtry Values",
+    x = "Number of Trees",
+    y = "Misclassification Rate",
+    color = "mtry"
+  ) +
+  theme_minimal()
+#Variableimportance
+importance <- importance(final_rf_model)
+var_importance <- data.frame(Variable = rownames(importance), Importance = importance[, "MeanDecreaseGini"])
+ggplot(var_importance, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Variable Importance",
+    x = "Variables",
+    y = "Importance"
+  ) +
+  theme_minimal()
+
+#ROC Curve
+rf_probabilities <- predict(final_rf_model, newdata = test_data2, type = "prob")[, 2]
+roc_curve <- roc(test_data2$Success, rf_probabilities, levels = rev(levels(test_data2$Success)))
+plot(roc_curve, col = "blue", lwd = 2, main = "ROC Curve for Random Forest Model")
+auc_value <- auc(roc_curve)
+cat("AUC:", auc_value, "\n")
+legend("bottomright", legend = paste("AUC =", round(auc_value, 3)), col = "blue", lwd = 2)
+
+
+
+
+set.seed(202412)
+
+#Edit data to new dataset as numeric neciessary
+Running_Data3$Success <- as.factor(Running_Data3$Success)
+Running_Data_3smote <- ROSE(Success ~ ., data = Running_Data3, N = 10000, p = 0.5)$data
+# Step 5: Partition the data (70% train, 30% test)
+train_indices <- createDataPartition(Running_Data_3smote$Success, p = 0.7, list = FALSE)
+train_data3 <- Running_Data_3smote[train_indices, ]
+test_data3 <- Running_Data_3smote[-train_indices, ]
+
+
+
+# Perform Box's M Test
+box_test_result <- boxM(data = train_data3[, -which(names(train_data3) == "Success")],
+                        grouping = train_data3$Success)
+print("Box's M Test Results:")
+print(box_test_result)
+#Using the model
+train_control <- trainControl(method = "cv", number = 10)  # 10-fold CV
+qda_cv_model <- train(Success ~ ., data = train_data3,
+                      method = "qda",
+                      trControl = train_control)
+print(qda_cv_model)
+qda_cv_results <- qda_cv_model$results
+print("Cross-Validation Results:")
+print(qda_cv_results)
+#Viewing Accuracy
+cv_misclassification <- 1 - qda_cv_model$results$Accuracy
+print(paste("Cross-Validation Misclassification Error:", round(cv_misclassification, 4)))
+qda_predictions <- predict(qda_cv_model, test_data3, type = "prob")[, 2]
+#ROC curve
+qda_roc <- roc(test_data3$Success, qda_predictions)
+plot(qda_roc, main = "ROC Curve for QDA", col = "blue")
+auc_qda <- auc(qda_roc)
+print(paste("AUC for QDA:", round(auc_qda, 4)))
+#Predictions
+qda_predictions_class <- predict(qda_cv_model, test_data3)
+conf_matrix <- confusionMatrix(qda_predictions_class, test_data3$Success)
+print("Confusion Matrix for QDA on Test Set:")
+print(conf_matrix)
+misclassification_error_test <- 1 - sum(diag(conf_matrix$table)) / sum(conf_matrix$table)
+print(paste("Misclassification Error on Test Set:", round(misclassification_error_test, 4)))
+# Plot ROC curve for QDA
+qda_roc <- roc(test_data3$Success, qda_predictions)
+plot(qda_roc, main = "ROC Curve for QDA", col = "blue")
+auc_qda <- auc(qda_roc)
+print(paste("AUC for QDA:", round(auc_qda, 4)))
+
+
+# Neural Network model
+nn_model <- train(Success ~ ., data = train_data3,
+                  method = "nnet",
+                  trControl = train_control,
+                  linout = FALSE,   \
+                  trace = FALSE)     
+print(nn_model)
+
+nn_misclassification <- 1 - nn_model$results$Accuracy
+print(paste("Neural Network Misclassification Error:", round(nn_misclassification, 4)))
+
+#Accuracy per fold neural network
+nn_results <- nn_model$results
+ggplot(nn_results, aes(x = factor(size), y = Accuracy, fill = factor(size))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Neural Network Cross-Validation Accuracy",
+       x = "Number of Hidden Nodes",
+       y = "Accuracy") +
+  theme_minimal()
+
+#Neural network model visualize
+nn_direct_model <- nnet(Success ~ ., data = train_data3, size = 5, linout = FALSE, trace = FALSE)
+plotnet(nn_direct_model, main = "Neural Network Visualization")
+
+
+#predictions
+nn_predictions <- predict(nn_model, test_data3, type = "prob")[, 2]
+nn_roc <- roc(test_data3$Success, nn_predictions)
+plot(nn_roc, main = "ROC Curve for Neural Network", col = "green")
+auc_nn <- auc(nn_roc)
+print(paste("AUC for Neural Network:", round(auc_nn, 4)))
+
+nn_predicted_classes <- ifelse(nn_predictions > 0.5, "1", "0")
+conf_matrix_nn <- confusionMatrix(factor(nn_predicted_classes, levels = c("0", "1")),
+                                  factor(test_data3$Success, levels = c("0", "1")))
+print(conf_matrix_nn)
+misclassification_error <- 1 - sum(diag(conf_matrix_nn$table)) / sum(conf_matrix_nn$table)
+print(paste("Misclassification Error:", round(misclassification_error, 4)))
+
+
+
+
+# Ensure Success is a factor
+train_data3$Success <- as.factor(train_data3$Success)
+test_data3$Success <- as.factor(test_data3$Success)
+
+# Define levels of sigma and C to find ideal metrics
+sigma_values <- c(0.01, 0.1, 0.2)
+c_values <- c(0.1, 0.5, 1)
+results <- data.frame(Sigma = numeric(), C = numeric(), MisclassificationError = numeric())
+for (sigma in sigma_values) {
+  for (c in c_values) {
+    # Train the SVM model
+    model <- svm(
+      Success ~ ., 
+      data = train_data3, 
+      kernel = "radial", 
+      cost = c, 
+      gamma = 1 / (2 * sigma^2),
+      probability = TRUE
+    )
+    
+ #Predictions
+    predictions <- predict(model, test_data3)
+    misclassification_error <- mean(predictions != test_data3$Success)
+    results <- rbind(results, data.frame(Sigma = sigma, C = c, MisclassificationError = misclassification_error))
+    print(paste("Sigma:", sigma, "C:", c, "Misclassification Error:", round(misclassification_error, 4)))
+  }
+}
+best_result <- results[which.min(results$MisclassificationError), ]
+print("Best Parameters:")
+print(best_result)
+best_sigma <- best_result$Sigma
+best_c <- best_result$C
+
+# Train the best linear SVM model
+best_linear_model <- svm(
+  Success ~ ., 
+  data = train_data3, 
+  kernel = "linear", 
+  cost = best_c, 
+  probability = TRUE
+)
+
+#ROC
+linear_predictions <- predict(best_linear_model, test_data3, probability = TRUE)
+linear_prob <- attr(linear_predictions, "probabilities")[, 2]  
+linear_roc <- roc(test_data3$Success, linear_prob)
+
+linear_predictions_class <- predict(best_linear_model, test_data3)
+linear_misclassification_error <- mean(linear_predictions_class != test_data3$Success)
+print(paste("Misclassification Error for Best Linear SVM Model:", round(linear_misclassification_error, 4)))
+  Success ~ ., 
+  data = train_data3, 
+  kernel = "radial", 
+  cost = best_c, 
+  gamma = 1 / (2 * best_sigma^2), 
+  probability = TRUE
+)
+radial_predictions <- predict(best_radial_model, test_data3, probability = TRUE)
+radial_prob <- attr(radial_predictions, "probabilities")[, 2]
+
+radial_roc <- roc(test_data3$Success, radial_prob)
+radial_predictions_class <- predict(best_radial_model, test_data3)
+radial_misclassification_error <- mean(radial_predictions_class != test_data3$Success)
+print(paste("Misclassification Error for Best Radial SVM Model:", round(radial_misclassification_error, 4)))
+
+# Plot both ROC curves together
+plot(linear_roc, main = "ROC Curves for Linear and Radial SVM Models", col = "blue", lwd = 2)
+plot(radial_roc, col = "red", lwd = 2, add = TRUE)
+legend("bottomright", legend = c("Linear SVM", "Radial SVM"), col = c("blue", "red"), lwd = 2)
+linear_auc <- auc(linear_roc)
+radial_auc <- auc(radial_roc)
+print(paste("AUC for Best Linear SVM Model:", round(linear_auc, 4)))
+print(paste("AUC for Best Radial SVM Model:", round(radial_auc, 4)))
+
+
+
+
+
+
+
+
+
+
+set.seed(202412)
+#Redo code in order to have a better model
+Passing_Data2$Success <- as.factor(Passing_Data2$Success)
+Passing_Data2smote <- ROSE(Success ~ ., data = Passing_Data2, N = 10000, p = 0.5)$data 
+train_indices <- createDataPartition(Passing_Data2smote$Success, p = 0.7, list = FALSE)
+train_data4 <- Passing_Data2smote[train_indices, ]
+test_data4 <- Passing_Data2smote[-train_indices, ]
+
+# Step 2: Perform Box's M Test
+box_test_result2 <- boxM(data = train_data4[, -which(names(train_data4) == "Success")],
+                        grouping = train_data4$Success)
+print("Box's M Test Results:")
+print(box_test_result2)
+
+#QDA 
+train_control2 <- trainControl(method = "cv", number = 10)  # 10-fold CV
+qda_cv_model2 <- train(Success ~ ., data = train_data4,
+                      method = "qda",
+                      trControl = train_control)
+print(qda_cv_model2)
+
+# QDA Error
+qda_misclassification2 <- 1 - qda_cv_model2$results$Accuracy
+print(paste("QDA Cross-Validation Misclassification Error:", round(qda_misclassification2, 4)))
+qda_predictions_alt <- predict(qda_cv_model2, test_data4, type = "prob")[, 2]
+qda_roc_alt <- roc(test_data4$Success, qda_predictions_alt)
+plot(qda_roc_alt, main = "ROC Curve for QDA (Alternate Dataset)", col = "orange")
+auc_qda_alt <- auc(qda_roc_alt)
+print(paste("AUC for QDA (Alternate Dataset):", round(auc_qda_alt, 4)))
+
+# Neural Network
+nn_model2 <- train(Success ~ ., data = train_data4,
+                   method = "nnet",
+                   trControl = train_control2,
+                   linout = FALSE,  
+                   trace = FALSE)   
+print(nn_model2)
+nn_misclassification2 <- 1 - nn_model2$results$Accuracy
+print(paste("Neural Network Cross-Validation Misclassification Error:", round(nn_misclassification2, 4)))
+nn_results <- nn_model2$results
+#neural network plots
+ggplot(nn_results, aes(x = factor(size), y = Accuracy, fill = factor(size))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Neural Network Cross-Validation Accuracy",
+       x = "Number of Hidden Nodes",
+       y = "Accuracy") +
+  theme_minimal()
+nn_direct_model <- nnet(Success ~ ., data = train_data4, size = 5, linout = FALSE, trace = FALSE)
+plotnet(nn_direct_model, main = "Neural Network Visualization")
+
+
+
+# Precitions and ROC
+nn_predictions_alt <- predict(nn_model2, test_data4, type = "prob")[, 2]
+nn_roc_alt <- roc(test_data4$Success, nn_predictions_alt)
+plot(nn_roc_alt, main = "ROC Curve for Neural Network (Alternate Dataset)", col = "brown")
+auc_nn_alt <- auc(nn_roc_alt)
+print(paste("AUC for Neural Network (Alternate Dataset):", round(auc_nn_alt, 4)))
+
+#SVM data management
+train_data4$Success <- as.factor(train_data4$Success)
+test_data4$Success <- as.factor(test_data4$Success)
+levels(train_data4$Success) <- make.names(levels(train_data4$Success))
+levels(test_data4$Success) <- make.names(levels(test_data4$Success))
+print(levels(train_data4$Success))
+print(levels(test_data4$Success))
+
+#CV for SVM
+train_control2 <- trainControl(
+  method = "cv", 
+  number = 5, 
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary 
+)
+
+# Radial Kernel to find optimal metrics
+svm_tune_grid2 <- expand.grid(
+  sigma = c(0.01, 0.05, 0.1, 0.125, 0.2),  
+  C = c(0.1, 0.25, 0.5, 1, 2)             
+)
+
+svm_model2 <- train(
+  Success ~ ., 
+  data = train_data4,
+  method = "svmRadial",
+  trControl = train_control2,
+  tuneGrid = svm_tune_grid2,
+  metric = "Accuracy"
+)
+
+# Best parameters and misclassification error for SVM
+best_params2 <- svm_model2$bestTune
+svm_best_accuracy2 <- max(svm_model2$results$Accuracy)
+svm_misclassification2 <- 1 - svm_best_accuracy2
+
+print("Best Parameters for Radial SVM:")
+print(best_params2)
+print(paste("Radial SVM Cross-Validation Misclassification Error:", round(svm_misclassification2, 4)))
+
+# Train the best radial SVM model for testing
+best_svm_model2 <- svm(
+  Success ~ ., 
+  data = train_data4, 
+  kernel = "radial", 
+  gamma = 1 / (2 * best_params2$sigma^2), 
+  cost = best_params2$C, 
+  probability = TRUE
+)
+
+# Test predictions
+svm_test_predictions2 <- predict(best_svm_model2, test_data4, probability = TRUE)
+svm_test_prob2 <- attr(svm_test_predictions2, "probabilities")[, 2]
+svm_test_conf_matrix2 <- confusionMatrix(as.factor(svm_test_predictions2), test_data4$Success)
+svm_test_error2 <- 1 - svm_test_conf_matrix2$overall["Accuracy"]
+print("Radial SVM Test Set Confusion Matrix:")
+print(svm_test_conf_matrix2)
+print(paste("Radial SVM Test Set Misclassification Error:", round(svm_test_error2, 4)))
+
+# ROC Curve
+svm_radial_roc <- roc(test_data4$Success, svm_test_prob2)
+plot(svm_radial_roc, col = "red", lwd = 2, main = "ROC Curve for SVM (Radial Kernel)")
+auc_radial <- auc(svm_radial_roc)
+legend("bottomright", legend = paste("AUC =", round(auc_radial, 4)), col = "red", lwd = 2)
+
+
+#Linear
+svm_linear_model2 <- train(
+  Success ~ ., 
+  data = train_data4,
+  method = "svmLinear",
+  trControl = train_control2,
+  metric = "Accuracy"
+)
+
+#CV Error
+svm_linear_accuracy2 <- max(svm_linear_model2$results$Accuracy)
+svm_linear_misclassification2 <- 1 - svm_linear_accuracy2
+
+print(paste("Linear SVM Cross-Validation Misclassification Error:", round(svm_linear_misclassification2, 4)))
+svm_linear_test_predictions2 <- predict(svm_linear_model2, test_data4)
+svm_linear_test_conf_matrix2 <- confusionMatrix(svm_linear_test_predictions2, test_data4$Success)
+svm_linear_test_error2 <- 1 - svm_linear_test_conf_matrix2$overall["Accuracy"]
+
+print("Linear SVM Test Set Confusion Matrix:")
+print(svm_linear_test_conf_matrix2)
+print(paste("Linear SVM Test Set Misclassification Error:", round(svm_linear_test_error2, 4)))
+
+# Generate ROC Curve for Linear SVM
+svm_linear_prob <- predict(svm_linear_model2, newdata = test_data4, type = "prob")
+svm_linear_roc <- roc(test_data4$Success, svm_linear_prob[, 2])
+plot(svm_linear_roc, col = "blue", lwd = 2, main = "ROC Curve for SVM (Linear Kernel)")
+auc_linear <- auc(svm_linear_roc)
+legend("bottomright", legend = paste("AUC =", round(auc_linear, 4)), col = "blue", lwd = 2)
+#Comparison of Linear and Radial
+svm_comparison <- data.frame(
+  Kernel = c("Linear", "Radial"),
+  Misclassification_Error = c(svm_linear_test_error2, svm_test_error2)
+)
+
+ggplot(svm_comparison, aes(x = Kernel, y = Misclassification_Error, fill = Kernel)) +
+  geom_bar(stat = "identity", color = "black") +
+  labs(title = "Comparison of SVM Kernels",
+       x = "SVM Kernel",
+       y = "Misclassification Error") +
+  theme_minimal()
+
+plot(svm_radial_roc, col = "red", lwd = 2, main = "ROC Curves for SVM Kernels")
+lines(svm_linear_roc, col = "blue", lwd = 2)
+legend("bottomright", 
+       legend = c(paste("Radial AUC =", round(auc_radial, 4)), 
+                  paste("Linear AUC =", round(auc_linear, 4))),
+       col = c("red", "blue"), 
+       lwd = 2)
+
+
+
+
+
